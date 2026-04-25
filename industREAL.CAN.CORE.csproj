@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <PackageId>industREAL.CAN.CORE</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>industREAL</Authors>
+    <Description>industREAL CAN Core package, including CAN Dispatcher</Description>
+    <IsPackable>true</IsPackable>
+
+    <PackProjectReferences>true</PackProjectReferences>
+	  
+  </PropertyGroup>
+
+</Project>
