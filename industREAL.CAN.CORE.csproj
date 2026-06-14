@@ -20,8 +20,8 @@
     <Copyright>Copyright © 2026 industREAL.tech Ltd</Copyright>
     <PackageLicenseExpression>LGPL-3.0-only</PackageLicenseExpression>
     <RepositoryType>git</RepositoryType>
-    <RepositoryUrl>https://git.industreal.tech/industreal.can/core</RepositoryUrl>
-    <PackageProjectUrl>https://git.industreal.tech/industreal.can/core</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/industREAL-tech/can-core</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/industREAL-tech/can-core</PackageProjectUrl>
     <PackageTags>industREAL;CAN;CAN-FD;CANbus;dispatcher</PackageTags>
     <DebugType>embedded</DebugType>
     <Deterministic>true</Deterministic>
