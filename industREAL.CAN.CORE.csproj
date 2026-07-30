@@ -12,8 +12,15 @@
     <IsPackable>true</IsPackable>
 
     <PackProjectReferences>true</PackProjectReferences>
-	  
+
   </PropertyGroup>
+
+  <!-- The SDK globs **/*.cs, which would pull the test project's sources into the
+       library itself. Tests live in tests/ and build as their own project. -->
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
 
   <PropertyGroup>
     <Company>industREAL.tech Ltd</Company>

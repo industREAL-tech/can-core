@@ -5,3 +5,7 @@ obj/
 .vs/
 *.user
 *.suo
+
+# Test run artifacts
+TestResults/
+*.trx

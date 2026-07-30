@@ -10,24 +10,92 @@ namespace industREAL.CAN.CORE
     public sealed class CanDispatcher : IAsyncDisposable, IDisposable
     {
         // ----- incoming routing -----
-        private readonly Dictionary<uint, Action<CanFrame>> _exact = new();
-        private readonly List<(uint Match, uint Mask, Action<CanFrame> Handler)> _masked = new();
+        //
+        // Guarded by _routesLock. Route() used to read the dictionary and iterate
+        // the list with no synchronisation at all while Register* mutated them
+        // from arbitrary threads, so a registration concurrent with a frame could
+        // throw InvalidOperationException or corrupt the dictionary. The tables
+        // are swapped copy-on-write so Route() never holds a lock while calling
+        // into subscriber code.
+        private readonly object _routesLock = new();
+        private Dictionary<uint, List<Action<CanFrame>>> _exact = new();
+        private List<(uint Match, uint Mask, Action<CanFrame> Handler)> _masked = new();
 
-        public void RegisterExact(uint id, Action<CanFrame> handler) => _exact[id] = handler;
-        public void RegisterMasked(uint match, uint mask, Action<CanFrame> handler) => _masked.Add((match, mask, handler));
+        /// <summary>
+        /// Registers a handler for an exact identifier. Multiple handlers may be
+        /// registered for the same id and all of them are invoked.
+        /// </summary>
+        /// <remarks>
+        /// This used to be <c>_exact[id] = handler</c>, which silently replaced
+        /// any previously registered handler for that id - so two devices sharing
+        /// an id, or a second subscriber added later, quietly unsubscribed the
+        /// first with no diagnostic.
+        /// </remarks>
+        public void RegisterExact(uint id, Action<CanFrame> handler)
+        {
+            if (handler is null) throw new ArgumentNullException(nameof(handler));
+            lock (_routesLock)
+            {
+                var next = new Dictionary<uint, List<Action<CanFrame>>>(_exact);
+                next[id] = next.TryGetValue(id, out var existing)
+                    ? new List<Action<CanFrame>>(existing) { handler }
+                    : new List<Action<CanFrame>> { handler };
+                _exact = next;
+            }
+        }
 
+        public void RegisterMasked(uint match, uint mask, Action<CanFrame> handler)
+        {
+            if (handler is null) throw new ArgumentNullException(nameof(handler));
+            lock (_routesLock)
+            {
+                _masked = new List<(uint, uint, Action<CanFrame>)>(_masked) { (match, mask, handler) };
+            }
+        }
+
+        /// <summary>
+        /// Delivers a frame to every matching handler.
+        /// </summary>
+        /// <remarks>
+        /// Both the exact and the masked lookup used to <c>return</c> after the
+        /// first match, so fan-out was impossible by construction: a frame could
+        /// never reach both an exact subscriber and a masked one, nor two masked
+        /// ones. All matches are now invoked, and one throwing handler no longer
+        /// prevents the rest from seeing the frame.
+        /// </remarks>
         public void Route(CanFrame f)
+        {
+            if (f is null) return;
+
+            Dictionary<uint, List<Action<CanFrame>>> exact;
+            List<(uint Match, uint Mask, Action<CanFrame> Handler)> masked;
+            lock (_routesLock) { exact = _exact; masked = _masked; }
+
+            if (exact.TryGetValue(f._canID, out var handlers))
+            {
+                for (int i = 0; i < handlers.Count; i++) Invoke(handlers[i], f);
+            }
+
+            var id = f._canID;
+            for (int i = 0; i < masked.Count; i++)
+            {
+                if ((id & masked[i].Mask) == masked[i].Match) Invoke(masked[i].Handler, f);
+            }
+        }
+
+        private static void Invoke(Action<CanFrame> handler, CanFrame f)
         {
             try
             {
-                if (_exact.TryGetValue(f._canID, out var h)) { h(f); return; }
-                var id = f._canID;
-                foreach (var e in _masked)
-                    if ((id & e.Mask) == e.Match) { e.Handler(f); return; }
+                handler(f);
             }
             catch (Exception ex)
             {
-                Log.Debug("CAN Route EXCEPTION", ex.Message);
+                // The exception was previously passed as a FORMAT ARGUMENT to a
+                // message with no placeholder, so a sink doing
+                // string.Format(message, args) discarded it and the actual error
+                // text was lost.
+                Log.Error(ex, "CAN route handler threw");
             }
         }
 
@@ -84,10 +152,17 @@ namespace industREAL.CAN.CORE
         private void EnsureThread_NoLock()
         {
             if (_thread != null) return;
-            _cts = new CancellationTokenSource();
+            var cts = new CancellationTokenSource();
+            _cts = cts;
             _running = true;
 
-            _thread = new Thread(() => Loop(_cts.Token))
+            // Capture the token in a local. The lambda used to read the _cts FIELD,
+            // which is evaluated when the thread first runs - so a Dispose() that
+            // nulled _cts before the thread got going produced a
+            // NullReferenceException on an unhandled background thread, taking the
+            // process down.
+            var token = cts.Token;
+            _thread = new Thread(() => Loop(token))
             {
                 IsBackground = true,
                 Priority = ThreadPriority.AboveNormal, // tune for your needs
@@ -97,6 +172,24 @@ namespace industREAL.CAN.CORE
         }
 
         private void Loop(CancellationToken token)
+        {
+            // This runs on a dedicated background thread, so anything escaping here
+            // is an unhandled exception that terminates the whole process. Contain it.
+            try
+            {
+                LoopCore(token);
+            }
+            catch (ObjectDisposedException)
+            {
+                // The dispatcher was disposed underneath us; nothing left to do.
+            }
+            catch (Exception ex)
+            {
+                Log.Fatal(ex, "CAN dispatcher scheduler thread terminated");
+            }
+        }
+
+        private void LoopCore(CancellationToken token)
         {
             var sw = Stopwatch.StartNew();
             _nowTicks = sw.ElapsedTicks;
@@ -193,31 +286,75 @@ namespace industREAL.CAN.CORE
                 var j = Interlocked.Exchange(ref _job, null);
                 if (j is null) return;
 
+                bool stop;
                 lock (_owner._jobsLock)
                 {
                     j.Enabled = false;
                     _owner._jobs.Remove(j);
-                    if (_owner._jobs.Count == 0)
-                        _owner.Stop_NoLock();
+                    stop = _owner._jobs.Count == 0;
                 }
 
                 _owner._wake.Set();
+
+                // Deadlock fix: this used to call Stop_NoLock() - which Joins the
+                // dispatcher thread - while still holding _jobsLock. The loop
+                // takes _jobsLock on every iteration, so if it happened to be
+                // waiting for the lock, Join() waited for the loop and the loop
+                // waited for us. Stop outside the lock.
+                if (stop) _owner.StopThread();
             }
         }
 
-        private void Stop_NoLock()
+        /// <summary>
+        /// Stops the scheduler thread. Must NOT be called while holding
+        /// <c>_jobsLock</c>: it joins a thread that acquires that lock.
+        /// </summary>
+        private bool StopThread()
         {
-            _running = false;
-            try { _cts?.Cancel(); } catch { }
+            Thread? thread;
+            CancellationTokenSource? tokenSource;
+
+            lock (_jobsLock)
+            {
+                thread = _thread;
+                tokenSource = _cts;
+                _thread = null;
+                _cts = null;
+                _running = false;
+            }
+
+            if (thread is null) return true;
+
+            try { tokenSource?.Cancel(); } catch { }
             _wake.Set();
 
-            try { _thread?.Join(); } catch { }
-            _cts?.Dispose();
-            _thread = null;
-            _cts = null;
+            // Never join ourselves: a producer callback disposing the dispatcher
+            // runs on this very thread.
+            bool exited = true;
+            if (thread != Thread.CurrentThread)
+            {
+                try { exited = thread.Join(TimeSpan.FromSeconds(2)); } catch { exited = false; }
+            }
+            else
+            {
+                exited = false;   // still on the stack
+            }
+
+            tokenSource?.Dispose();
+            return exited;
         }
 
-        public void Dispose() => Stop_NoLock();
+        public void Dispose()
+        {
+            // Only dispose the wake handle once the loop is provably gone: the loop
+            // waits on it every iteration, and disposing it underneath a still-running
+            // thread would throw ObjectDisposedException on a background thread.
+            if (StopThread())
+            {
+                _wake.Dispose();
+            }
+        }
+
         public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
     }
 }
