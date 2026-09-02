@@ -31,7 +31,7 @@ namespace industREAL.CAN.CORE
         }
 
 
-        public virtual CanFrame getPeriodicOutput()
+        public virtual CanFrame? getPeriodicOutput()
         {
             return null;
         }
