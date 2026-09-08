@@ -6,7 +6,12 @@
     <Nullable>enable</Nullable>
 
     <PackageId>industREAL.CAN.CORE</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
+	  <!-- 0.2.0 is published on nuget.org and versions there are immutable, so the
+	       merge of the hardware-timestamp work with the addressing fix needs its own.
+	       Minor rather than patch: CanDeviceBase.FunctionMask widened from 0x0F to
+	       0xFF, so a subclass that relied on a four-bit function field sees different
+	       ownership. Nothing on this platform did, but it is a behaviour change. -->
     <Authors>industREAL</Authors>
     <Description>industREAL CAN Core package, including CAN Dispatcher</Description>
     <IsPackable>true</IsPackable>
