@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+﻿using System;
 
 namespace industREAL.CAN.CORE
 {
@@ -12,21 +12,35 @@ namespace industREAL.CAN.CORE
     [Flags]
     public enum CanFlags : uint
     {
-        None = 0x00000000,
+        None        = 0x00000000,
 
         // Frame type
         RemoteFrame = 0x20000000,
 
         // ID type
-        ExtendedId = 0x40000000,
+        ExtendedId  = 0x40000000,
 
         // Bit rate switching
-        BrsOn = 0x00100000,
+        BrsOn       = 0x00100000,
 
         // Format
         FdCanFormat = 0x00200000,
 
-        CONTROL = 0xCAFFEE
+        // Reserved-bit marker for control frames. This was CONTROL = 0xCAFFEE,
+        // a 20-bit sentinel in a [Flags] enum. It does not in fact overlap any
+        // flag defined here -- 0x00CAFFEE & (RemoteFrame | ExtendedId | BrsOn |
+        // FdCanFormat) is zero -- so nothing was being misread as FD or BRS.
+        // What it did break is composition: OR-ing it in set twenty otherwise
+        // meaningless bits, and HasFlag(CONTROL) demanded all twenty back, so
+        // any frame that had also picked up a real attribute failed the test.
+        // One reserved bit composes and tests correctly.
+        Control     = 0x80000000,
+    }
+
+    public enum CanFrameClass : byte
+    {
+        Data    = 0,
+        Control = 1,
     }
     public enum CanDLC : byte
     {
@@ -53,18 +67,20 @@ namespace industREAL.CAN.CORE
     /// One CAN / CAN-FD frame.
     /// </summary>
     /// <remarks>
-    /// The <c>StructLayout</c> attribute is decorative: this is a managed class
-    /// with properties and a reference-typed payload, so it is never blitted.
-    /// Serialization is done explicitly by the transport driver.
+    /// The <c>[StructLayout(LayoutKind.Sequential, Pack = 1)]</c> attribute this
+    /// type used to carry was decorative: it is a managed class with properties
+    /// and a reference-typed payload, so it is never blitted. Serialization is
+    /// done explicitly by the transport driver. Removed rather than documented --
+    /// an attribute that implies a memory layout the runtime does not honour is
+    /// worse than no attribute.
     /// </remarks>
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public sealed class CanFrame : ICloneable
     {
         private CanDLC _length;
 
-        public uint _canID { get; set; }
-        public CanFlags _flags { get; set; }
-        public UInt32 _frameID { get; set; }
+        public uint         _canID       { get; set; }
+        public CanFlags     _flags       { get; set; }
+        public UInt32       _frameID     { get; set; }
 
         /// <summary>
         /// Declared payload length. <see cref="_data"/> is allocated once at
@@ -87,19 +103,36 @@ namespace industREAL.CAN.CORE
             }
         }
 
-        public CanInterface _channel { get; set; }
-        public byte[] _data { get; }
+        public CanInterface _channel     { get; set; }
+        public byte[]       _data        { get; }
 
+        /// Device monotonic microseconds at the moment the frame was
+        /// observed by the gateway hardware (RX) or queued for TX.
+        /// Zero for frames constructed locally without a stamp.
+        public long         DeviceUs     { get; set; }
+
+        /// Host wall-clock timestamp converted from <see cref="DeviceUs"/>
+        /// via the driver's clock-sync filter. Nullable so locally-built
+        /// frames are unambiguous.
+        public DateTime?    HostUtc      { get; set; }
+
+        public CanFrameClass Class
+        {
+            get => (_flags & CanFlags.Control) != 0 ? CanFrameClass.Control : CanFrameClass.Data;
+            set => _flags = value == CanFrameClass.Control
+                ? (_flags | CanFlags.Control)
+                : (_flags & ~CanFlags.Control);
+        }
         public CanFrame(CanDLC dlc)
         {
             if ((byte)dlc > 64)
             {
                 throw new ArgumentException("CAN frame can not exceed 64 byte!");
             }
-            _data = new byte[(byte)dlc];
-            this._length = dlc;
-            this._channel = CanInterface.A;
-            this._frameID = 0; //TDOD: Write generator function
+            _data            = new byte[(byte)dlc];
+            this._length     = dlc;
+            this._channel    = CanInterface.A;
+            this._frameID    = 0;
         }
 
         /// <summary>
@@ -120,6 +153,8 @@ namespace industREAL.CAN.CORE
                 _flags   = _flags,
                 _frameID = _frameID,
                 _channel = _channel,
+                DeviceUs = DeviceUs,
+                HostUtc  = HostUtc,
             };
             Buffer.BlockCopy(_data, 0, copy._data, 0, _data.Length);
             copy._length = _length;

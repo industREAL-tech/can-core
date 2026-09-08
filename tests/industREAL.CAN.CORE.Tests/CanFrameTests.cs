@@ -1,4 +1,5 @@
 using industREAL.CAN.CORE;
+using System.Collections.Generic;
 using Xunit;
 
 namespace industREAL.CAN.CORE.Tests;
@@ -89,20 +90,94 @@ public class CanFrameTests
         }
     }
 
-    [Fact]
-    public void ControlFlagCannotCollideWithAnyHardwareFlagCombination()
+    private static readonly CanFlags[] HardwareBits =
+        { CanFlags.RemoteFrame, CanFlags.ExtendedId, CanFlags.BrsOn, CanFlags.FdCanFormat };
+
+    private static IEnumerable<CanFlags> AllHardwareCombinations()
     {
-        // The gateway distinguishes control frames by an exact flags == CONTROL
-        // test, so no combination of the real HAL bits may equal it.
-        CanFlags[] bits = { CanFlags.RemoteFrame, CanFlags.ExtendedId,
-                            CanFlags.BrsOn, CanFlags.FdCanFormat };
         for (int mask = 0; mask < (1 << 4); mask++)
         {
             CanFlags v = CanFlags.None;
-            for (int i = 0; i < bits.Length; i++)
-                if ((mask >> i & 1) != 0) v |= bits[i];
-
-            Assert.NotEqual(CanFlags.CONTROL, v);
+            for (int i = 0; i < HardwareBits.Length; i++)
+                if ((mask >> i & 1) != 0) v |= HardwareBits[i];
+            yield return v;
         }
+    }
+
+    [Fact]
+    public void ControlFlagCannotCollideWithAnyHardwareFlagCombination()
+    {
+        // This case was written against CONTROL = 0xCAFFEE, when the gateway
+        // distinguished control frames by an exact flags == CONTROL test. The
+        // member is now Control = 0x80000000, one reserved bit.
+        foreach (CanFlags v in AllHardwareCombinations())
+            Assert.NotEqual(CanFlags.Control, v);
+    }
+
+    [Fact]
+    public void ControlFlagComposesWithHardwareFlagsInsteadOfReplacingThem()
+    {
+        // The point of the single bit, and what 0xCAFFEE actually got wrong. It
+        // did not collide with any flag defined here, so nothing was misread as
+        // FD or BRS -- but it was twenty bits, so HasFlag(CONTROL) demanded all
+        // twenty back and any frame that had also picked up a real attribute
+        // failed the test. One bit sets, tests and clears independently.
+        foreach (CanFlags v in AllHardwareCombinations())
+        {
+            CanFlags withControl = v | CanFlags.Control;
+
+            Assert.True(withControl.HasFlag(CanFlags.Control));
+            foreach (CanFlags bit in HardwareBits)
+                Assert.Equal(v.HasFlag(bit), withControl.HasFlag(bit));
+
+            Assert.Equal(v, withControl & ~CanFlags.Control);
+        }
+    }
+
+    [Fact]
+    public void ClassPropertyReflectsTheControlFlag()
+    {
+        var f = new CanFrame(CanDLC.DLC_8) { _flags = CanFlags.ExtendedId };
+        Assert.Equal(CanFrameClass.Data, f.Class);
+
+        f.Class = CanFrameClass.Control;
+        Assert.Equal(CanFrameClass.Control, f.Class);
+        Assert.True(f._flags.HasFlag(CanFlags.ExtendedId));   // not clobbered
+
+        f.Class = CanFrameClass.Data;
+        Assert.Equal(CanFrameClass.Data, f.Class);
+        Assert.Equal(CanFlags.ExtendedId, f._flags);
+    }
+
+    [Fact]
+    public void CloneCarriesTheTimestampsAndStillDeepCopiesThePayload()
+    {
+        // The merge seam: the deep copy and the length guard came from one branch,
+        // the hardware timestamps from another, and neither side's Clone knew
+        // about the other's fields.
+        var f = new CanFrame(CanDLC.DLC_8)
+        {
+            _canID = 0x0020006,
+            _flags = CanFlags.ExtendedId,
+            _channel = CanInterface.B,
+            DeviceUs = 1234567,
+            HostUtc = new DateTime(2026, 9, 8, 12, 0, 0, DateTimeKind.Utc),
+        };
+        for (int i = 0; i < 8; i++) f._data[i] = (byte)(i + 1);
+        f._dataLength = CanDLC.DLC_5;      // reduced below the allocation
+
+        var c = (CanFrame)f.Clone();
+
+        Assert.Equal(f._canID, c._canID);
+        Assert.Equal(f._flags, c._flags);
+        Assert.Equal(f._channel, c._channel);
+        Assert.Equal(f.DeviceUs, c.DeviceUs);
+        Assert.Equal(f.HostUtc, c.HostUtc);
+        Assert.Equal(CanDLC.DLC_5, c._dataLength);   // reduced length preserved
+        Assert.Equal(8, c._data.Length);             // whole buffer still copied
+        Assert.Equal(f._data, c._data);
+
+        c._data[0] = 0xFF;
+        Assert.Equal(1, f._data[0]);                 // not aliased
     }
 }
