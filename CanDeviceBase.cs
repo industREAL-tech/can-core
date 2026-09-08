@@ -25,11 +25,29 @@ namespace industREAL.CAN.CORE
         /// <summary>
         /// Bits of the CAN identifier that carry the function code rather than
         /// the device address. Devices on this bus are addressed as
-        /// <c>canBaseID | function</c> with the function in the low nibble, so
-        /// identity comparisons have to mask it off. Override if a device family
-        /// uses a wider function field.
+        /// <c>canBaseID | function</c>, so identity comparisons have to mask the
+        /// function off. Override only for a family that provably uses fewer bits.
         /// </summary>
-        protected virtual uint FunctionMask => 0x0Fu;
+        /// <remarks>
+        /// This was 0x0F -- a four-bit function field -- which no device family on
+        /// this platform actually uses. Every base address is allocated on a 0x100
+        /// stride (servo 0x20000, linear actuator 0x40100/0x40200/..., keypad
+        /// 0x50100/0x50200), which only makes sense if the function occupies the
+        /// low BYTE, and the SSDM-05 firmware confirms it: its receive filter
+        /// accepts exactly <c>base | 0x00 .. 0xFF</c>, and it defines services from
+        /// 0x00 up to 0x7F.
+        ///
+        /// With a four-bit mask, <see cref="Owns"/> rejected every service at or
+        /// above 0x10 -- FirmwareVersion 0x10, ParamRead 0x11, ParamWrite 0x12,
+        /// Store 0x13, and the generic Ack 0x7F -- as belonging to some other
+        /// device. A host could send those requests and would then discard the
+        /// replies, so parameter access and every acknowledged command silently
+        /// timed out.
+        ///
+        /// Widening it cannot take frames away from another device: the next base
+        /// is 0x100 higher either way.
+        /// </remarks>
+        protected virtual uint FunctionMask => 0xFFu;
 
         protected CanDeviceBase(uint canBaseID, string nickName = "")
         {
